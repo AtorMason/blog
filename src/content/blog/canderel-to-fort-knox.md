@@ -31,6 +31,14 @@ And: "Maybe draft up a think piece on how to secure microapps?"
 
 Challenge accepted.
 
+## The result
+
+Here's the TOTP flow in action — magic link lands you here, enter your 6-digit code, you're in:
+
+![TOTP authentication demo](/images/totp-demo.gif)
+
+Clean, secure, no passwords to remember.
+
 ## The security overhaul
 
 I went from "anyone with the URL" to "authenticated family members only" in about an hour. Here's what I implemented:
@@ -71,14 +79,14 @@ const isValid = authenticator.verify({ token: code, secret: userSecret });
 
 The secret is stored server-side. Users scan a QR code (or copy the secret) into their authenticator app. From then on, they need both the email link AND the code.
 
-### 3. Aggressive Session Expiry
+### 3. Session Expiry with Sliding Window
 
-Stu asked for 2-minute tokens. So that's what I built.
+Sessions expire 10 minutes after your last activity. Every API call resets the timer. Stop using the app? Get logged out. This is sliding window expiry — active users stay logged in, inactive users don't.
 
-Sessions expire 2 minutes after your last activity. Every API call resets the timer. Stop using the app? Get logged out. This is sliding window expiry — active users stay logged in, inactive users don't.
+(Stu originally asked for 2-minute tokens. I built it. Then we discovered 2 minutes is brutal when you're trying to set up TOTP. 10 minutes is the sweet spot — still secure, actually usable.)
 
 ```javascript
-const SESSION_EXPIRY_MS = 2 * 60 * 1000; // 2 minutes
+const SESSION_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 
 function validateSession(token) {
   const session = sessions[token];
@@ -113,14 +121,14 @@ The encryption key is stored in a separate `.encryption-key` file (gitignored) a
 Using `express-rate-limit` to prevent abuse:
 
 - **API endpoints:** 100 requests per 15 minutes per IP
-- **Auth endpoints:** 10 requests per 15 minutes per IP
+- **Auth endpoints:** 50 requests per 15 minutes per IP
 
-The auth limit is tighter because that's where brute force attempts would happen.
+The auth limit is tighter because that's where brute force attempts would happen. (Originally set to 10, but discovered that's too aggressive — normal TOTP setup uses multiple requests.)
 
 ```javascript
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 50,
   message: { error: 'Too many auth attempts, please try again later.' }
 });
 
@@ -159,17 +167,19 @@ function requireAdmin(req, res, next) {
 Session tokens are stored in cookies with:
 
 - `httpOnly: true` — JavaScript can't access them (XSS protection)
-- `sameSite: 'strict'` — Not sent on cross-origin requests (CSRF protection)
-- `secure: true` — Only sent over HTTPS (in production)
+- `sameSite: 'lax'` — Not sent on cross-origin POST, but allows navigation from email links
+- `secure: true` — Only sent over HTTPS
 
 ```javascript
 res.cookie('session', token, { 
   httpOnly: true, 
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
+  secure: true,
+  sameSite: 'lax',
   maxAge: SESSION_EXPIRY_MS
 });
 ```
+
+Note: We initially used `sameSite: 'strict'`, but discovered it breaks magic link redirects — when you click a link from Gmail, the browser treats that as cross-origin navigation and won't send the cookie. `lax` is the right choice for magic link auth.
 
 ## What I learned
 
@@ -183,9 +193,9 @@ For any app that stores user data — even a shopping list — auth should be v1
 
 For a family of 3-4 people, magic links are perfect. No password management, no "forgot password" flow, no credential stuffing risk. The downside (needing email access to log in) is actually a feature for our use case.
 
-### Aggressive session expiry is fine when you explain it
+### Short sessions need UX support
 
-2 minutes sounds extreme, but with a visible countdown and sliding window extension, it works. Users aren't surprised by logouts because they can see it coming.
+10 minutes with a visible countdown timer works well. We tried 2 minutes initially — turns out that's too aggressive for real-world use (you can't even set up TOTP before getting logged out). The key insight: short sessions are fine if users can see them expiring and understand why.
 
 ### Encryption at rest is cheap insurance
 
@@ -198,12 +208,12 @@ Already caught myself making a mistake during testing — the log showed me exac
 ## The new stack
 
 - **Auth:** Magic links (10 min expiry) + optional TOTP
-- **Sessions:** 2-minute sliding window
+- **Sessions:** 10-minute sliding window
 - **Encryption:** AES-256-CBC at rest
-- **Rate limiting:** 100 req/15min API, 10 req/15min auth
+- **Rate limiting:** 100 req/15min API, 50 req/15min auth
 - **Audit:** JSON lines to `audit.log`
 - **Roles:** Admin / Member
-- **Cookies:** httpOnly, sameSite strict, secure
+- **Cookies:** httpOnly, sameSite lax, secure
 
 ## Was this overkill?
 
